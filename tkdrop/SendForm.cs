@@ -272,8 +272,7 @@ namespace TkDrop
             _peerLink.Enabled = !busy;
             _cancelButton.Enabled = busy;
             _dropLabel.Text = busy ? "전송 중..." : "파일이나 폴더를 여기에 끌어다 놓으세요";
-            if (!busy) _status.ForeColor = SystemColors.ControlText;
-            UseWaitCursor = false;
+            _status.ForeColor = SystemColors.ControlText; // OnFinished recolours after this call
         }
 
         private void Ui(Action action)

@@ -62,20 +62,22 @@ namespace TkDrop
             return result;
         }
 
+        public const int ConnectTimeoutMs = 25000;
+
         /// <summary>
         /// Connects to the peer's tkdrop service and runs the send session. Blocking; run on a worker thread.
         /// </summary>
-        public const int ConnectTimeoutMs = 25000;
-
         public static void SendTo(string peerAddress, IList<SendItem> items, Action<string> onStatus, Action<TransferProgress> onProgress, CancellationToken cancel)
         {
             BluetoothAddress address;
             if (!TryParseAddress(peerAddress, out address))
                 throw new InvalidOperationException("상대 노트북이 선택되지 않았습니다. 트레이 메뉴에서 '상대 노트북 선택'을 먼저 해주세요.");
 
-            var client = new BluetoothClient();
+            BluetoothClient client = null;
+            bool connected = false;
             try
             {
+                client = new BluetoothClient(); // throws SocketException when this PC has no Bluetooth stack
                 client.Authenticate = true;
                 client.Encrypt = true;
 
@@ -98,6 +100,7 @@ namespace TkDrop
                     }
                 }
                 cancel.ThrowIfCancellationRequested();
+                connected = true;
 
                 var stream = client.GetStream();
                 if (stream == null) throw new IOException("연결이 바로 끊어졌습니다.");
@@ -120,16 +123,24 @@ namespace TkDrop
             }
             catch (SocketException ex)
             {
-                throw new IOException(DescribeSocketError(ex), ex);
+                throw new IOException(connected ? DescribeTransferError(ex) : DescribeSocketError(ex), ex);
             }
             catch (IOException ex) when (ex.InnerException is SocketException)
             {
-                throw new IOException(DescribeSocketError((SocketException)ex.InnerException), ex);
+                var se = (SocketException)ex.InnerException;
+                throw new IOException(connected ? DescribeTransferError(se) : DescribeSocketError(se), ex);
             }
             finally
             {
-                SafeClose(client);
+                if (client != null) SafeClose(client);
             }
+        }
+
+        private static string DescribeTransferError(SocketException ex)
+        {
+            if (ex.SocketErrorCode == SocketError.TimedOut)
+                return "전송 중 상대가 응답하지 않습니다. 거리가 멀거나 상대 쪽이 멈춘 것 같습니다. (" + ex.NativeErrorCode + ")";
+            return "전송 중 연결이 끊겼습니다. (" + ex.SocketErrorCode + ", " + ex.NativeErrorCode + ")";
         }
 
         private static string DescribeSocketError(SocketException ex)
@@ -187,10 +198,12 @@ namespace TkDrop
             return false;
         }
 
-        /// <summary>"Bluetooth is off or missing" check. BluetoothRadio.Default throws PlatformNotSupportedException in that case.</summary>
+        /// <summary>"Bluetooth is off or missing" check (handle-safe Win32 enumeration; falls back to 32feet).</summary>
         public static bool RadioAvailable()
         {
-            try { var r = BluetoothRadio.Default; return r != null; }
+            var state = RadioWatch.IsRadioOn();
+            if (state.HasValue) return state.Value;
+            try { var r = BluetoothRadio.Default; return r != null; } // throws PlatformNotSupportedException when absent
             catch { return false; }
         }
     }
@@ -201,6 +214,7 @@ namespace TkDrop
         private readonly AppSettings _settings;
         private readonly Thread _thread;
         private volatile bool _stopping;
+        private volatile int _restartGeneration;
         private BluetoothListener _listener;
         private readonly object _gate = new object();
 
@@ -231,6 +245,7 @@ namespace TkDrop
             BluetoothListener l;
             lock (_gate)
             {
+                _restartGeneration++;
                 l = _listener;
                 _listener = null;
             }
@@ -263,11 +278,19 @@ namespace TkDrop
             while (!_stopping)
             {
                 BluetoothListener listener = null;
+                bool started = false;
                 try
                 {
+                    int generation = _restartGeneration;
                     listener = new BluetoothListener(Protocol.ServiceId) { ServiceName = Protocol.ServiceName };
                     listener.Start();
-                    lock (_gate) { _listener = listener; }
+                    lock (_gate)
+                    {
+                        // A Restart() that raced with Start() must not leave a stale socket listening.
+                        if (generation != _restartGeneration) throw new OperationCanceledException();
+                        _listener = listener;
+                    }
+                    started = true;
                     failures = 0;
                     SetStatus(true, "수신 대기 중");
 
@@ -281,7 +304,7 @@ namespace TkDrop
                 {
                     if (_stopping) break;
                     bool wasRestart;
-                    lock (_gate) { wasRestart = _listener == null; }
+                    lock (_gate) { wasRestart = ex is OperationCanceledException || (started && _listener != listener); }
                     if (!wasRestart)
                     {
                         failures++;

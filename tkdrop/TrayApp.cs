@@ -21,6 +21,8 @@ namespace TkDrop
         private Action _balloonAction;
         private readonly Stopwatch _tooltipThrottle = Stopwatch.StartNew();
         private Timer _resumeTimer;
+        private readonly Timer _radioTimer = new Timer { Interval = 15000 };
+        private bool? _lastRadioOn;
 
         public TrayApp(AppSettings settings)
         {
@@ -60,12 +62,27 @@ namespace TkDrop
             _receiver.StatusChanged += text => Ui(() => SetTooltip(text));
             _receiver.ItemReceived += item => Ui(() => OnReceived(item));
             _receiver.PeerAutoRegistered += (name, addr) => Ui(() => Balloon("상대 노트북 등록됨", name + "\n" + addr + "\n이제 이 노트북에서도 바로 보낼 수 있습니다.", ToolTipIcon.Info, null));
-            _receiver.Blocked += who => Ui(() => Balloon("연결 차단", who + " 에서 연결을 시도했지만 선택된 상대 노트북이 아니라 거부했습니다.", ToolTipIcon.Warning, null));
+            _receiver.Blocked += who => Ui(() => Balloon("연결 차단", who + " 에서 연결을 시도했지만, 선택된 상대 노트북이 아니거나 페어링되지 않은 장치라 거부했습니다.", ToolTipIcon.Warning, null));
             _receiver.Failed += msg => Ui(() => Balloon("수신 실패", msg, ToolTipIcon.Error, null));
             _receiver.Progress += p => Ui(() => OnReceiveProgress(p));
             _receiver.Start();
 
             SystemEvents.PowerModeChanged += OnPowerModeChanged;
+
+            // A listening RFCOMM socket is not guaranteed to survive the radio being toggled; watch the radio
+            // state and recreate the listener on every off->on / on->off transition.
+            _lastRadioOn = RadioWatch.IsRadioOn();
+            _radioTimer.Tick += (s, e) =>
+            {
+                var now = RadioWatch.IsRadioOn();
+                if (now.HasValue && _lastRadioOn.HasValue && now.Value != _lastRadioOn.Value)
+                {
+                    _receiver.Restart();
+                    if (!now.Value) SetTooltip("블루투스가 꺼져 있습니다");
+                }
+                _lastRadioOn = now;
+            };
+            _radioTimer.Start();
 
             RefreshPeerLabel();
             if (!_settings.HasPeer)
@@ -237,6 +254,9 @@ namespace TkDrop
         protected override void ExitThreadCore()
         {
             SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+            _radioTimer.Stop();
+            _radioTimer.Dispose();
+            if (_resumeTimer != null) _resumeTimer.Dispose();
             try { _tray.Visible = false; } catch { }
             _receiver.Dispose();
             _tray.Dispose();
