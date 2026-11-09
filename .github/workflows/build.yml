@@ -16,8 +16,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Version from tag (v1.2.3 -> 1.2.3)
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "1.0.0"
+          if ("${{ github.ref }}" -like "refs/tags/v*") { $v = "${{ github.ref_name }}".Substring(1) }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "building version $v"
+
       - name: Build (Release, .NET Framework 4.8)
-        run: dotnet build tkdrop/tkdrop.csproj -c Release -p:ContinuousIntegrationBuild=true
+        run: dotnet build tkdrop/tkdrop.csproj -c Release -p:ContinuousIntegrationBuild=true -p:Version=${{ steps.ver.outputs.version }}
 
       - name: Check single-exe output
         shell: pwsh

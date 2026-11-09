@@ -54,16 +54,53 @@ namespace TkDrop
             w.Flush();
         }
 
+        /// <summary>Upper bound for the sender name in the hello.</summary>
+        public const int MaxSenderNameBytes = 256;
+
         /// <summary>Reads and validates the hello header; returns the sender's name.</summary>
         public static string ReadHello(BinaryReader r)
         {
-            var magic = r.ReadBytes(4);
-            if (magic.Length != 4 || magic[0] != Magic[0] || magic[1] != Magic[1] || magic[2] != Magic[2] || magic[3] != Magic[3])
+            byte[] magic;
+            byte version;
+            try
+            {
+                magic = r.ReadBytes(4);
+                if (magic.Length != 4) throw new EndOfStreamException();
+                version = r.ReadByte();
+            }
+            catch (EndOfStreamException)
+            {
+                throw new IOException("상대가 연결 직후 끊었습니다.");
+            }
+            if (magic[0] != Magic[0] || magic[1] != Magic[1] || magic[2] != Magic[2] || magic[3] != Magic[3])
                 throw new InvalidDataException("tkdrop 프로토콜이 아닌 연결입니다.");
-            var version = r.ReadByte();
             if (version != Version)
                 throw new InvalidDataException("상대 tkdrop 버전이 달라 통신할 수 없습니다. (상대 v" + version + ", 나 v" + Version + ")");
-            return r.ReadString();
+            return ReadBoundedString(r, MaxSenderNameBytes);
+        }
+
+        /// <summary>BinaryWriter.Write(string)-compatible read that refuses lengths above <paramref name="maxBytes"/> before allocating.</summary>
+        public static string ReadBoundedString(BinaryReader r, int maxBytes)
+        {
+            int length = Read7BitEncodedInt(r);
+            if (length < 0 || length > maxBytes) throw new InvalidDataException("문자열 길이가 허용 범위를 벗어났습니다: " + length);
+            var bytes = r.ReadBytes(length);
+            if (bytes.Length != length) throw new EndOfStreamException();
+            return Utf8.GetString(bytes);
+        }
+
+        private static int Read7BitEncodedInt(BinaryReader r)
+        {
+            int count = 0, shift = 0;
+            byte b;
+            do
+            {
+                if (shift == 5 * 7) throw new FormatException("잘못된 7비트 길이 접두사");
+                b = r.ReadByte();
+                count |= (b & 0x7F) << shift;
+                shift += 7;
+            } while ((b & 0x80) != 0);
+            return count;
         }
 
         /// <summary>
@@ -114,6 +151,7 @@ namespace TkDrop
             var stem = name;
             int dot = stem.IndexOf('.');
             if (dot >= 0) stem = stem.Substring(0, dot);
+            stem = stem.Trim(); // "CON .txt" is still CON on Windows
             switch (stem.ToUpperInvariant())
             {
                 case "CON": case "PRN": case "AUX": case "NUL":

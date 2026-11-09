@@ -84,7 +84,7 @@ namespace TkDrop
                         }
                         if (devices.Count == 0)
                         {
-                            _list.Items.Add("페어링된 장치가 없습니다.");
+                            _list.Items.Add(BtLink.RadioAvailable() ? "페어링된 장치가 없습니다." : "블루투스가 꺼져 있거나 없습니다.");
                             return;
                         }
                         _list.Enabled = true;

@@ -98,7 +98,7 @@ namespace TkDrop
                     if (string.IsNullOrEmpty(text))
                     {
                         MessageBox.Show("클립보드에 보낼 텍스트가 없습니다.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        return new List<SendItem>();
+                        continue; // other arguments may still be files
                     }
                     items.Add(SendItem.FromText(text));
                 }

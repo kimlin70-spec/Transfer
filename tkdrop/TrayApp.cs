@@ -46,7 +46,7 @@ namespace TkDrop
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("정보", null, (s, e) => ShowAbout());
             menu.Items.Add("종료", null, (s, e) => ExitThread());
-            menu.Opening += (s, e) => RefreshPeerLabel();
+            menu.Opening += (s, e) => { _settings.Refresh(); RefreshPeerLabel(); };
 
             _tray = new NotifyIcon
             {
@@ -61,9 +61,14 @@ namespace TkDrop
             _receiver = new Receiver(_settings);
             _receiver.StatusChanged += text => Ui(() => SetTooltip(text));
             _receiver.ItemReceived += item => Ui(() => OnReceived(item));
-            _receiver.PeerAutoRegistered += (name, addr) => Ui(() => Balloon("상대 노트북 등록됨", name + "\n" + addr + "\n이제 이 노트북에서도 바로 보낼 수 있습니다.", ToolTipIcon.Info, null));
+            _receiver.PeerAutoRegistered += (name, addr) => Ui(() =>
+            {
+                RefreshPeerLabel();
+                if (_sendForm != null && !_sendForm.IsDisposed) _sendForm.RefreshPeer();
+                Balloon("상대 노트북 등록됨", name + "\n" + addr + "\n이제 이 노트북에서도 바로 보낼 수 있습니다.", ToolTipIcon.Info, null);
+            });
             _receiver.Blocked += who => Ui(() => Balloon("연결 차단", who + " 에서 연결을 시도했지만, 선택된 상대 노트북이 아니거나 페어링되지 않은 장치라 거부했습니다.", ToolTipIcon.Warning, null));
-            _receiver.Failed += msg => Ui(() => Balloon("수신 실패", msg, ToolTipIcon.Error, null));
+            _receiver.Failed += msg => Ui(() => { SetTooltip(_receiver.Status); Balloon("수신 실패", msg, ToolTipIcon.Error, null); });
             _receiver.Progress += p => Ui(() => OnReceiveProgress(p));
             _receiver.Start();
 
@@ -135,12 +140,30 @@ namespace TkDrop
             if (item.IsText)
             {
                 bool copied = false;
+                string savedTo = null;
                 if (!string.IsNullOrEmpty(item.Text))
                 {
-                    try { Clipboard.SetText(item.Text); copied = true; } catch { } // ExternalException when another app holds the clipboard
+                    try { Clipboard.SetText(item.Text); copied = true; } // retries 10x100ms internally
+                    catch
+                    {
+                        // Another app holds the clipboard (RDP, clipboard managers...): do not lose the text.
+                        try
+                        {
+                            var folder = _settings.ResolvedSaveFolder;
+                            Directory.CreateDirectory(folder);
+                            savedTo = Protocol.UniquePath(folder, "텍스트 " + DateTime.Now.ToString("yyyy-MM-dd HHmmss") + ".txt");
+                            File.WriteAllText(savedTo, item.Text, Protocol.Utf8);
+                        }
+                        catch { savedTo = null; }
+                    }
                 }
                 var preview = item.Text.Length > 120 ? item.Text.Substring(0, 120) + "..." : item.Text;
-                Balloon(copied ? "텍스트 받음 (클립보드에 복사됨)" : "텍스트 받음", preview, ToolTipIcon.Info, null);
+                if (copied)
+                    Balloon("텍스트 받음 (클립보드에 복사됨)", preview, ToolTipIcon.Info, null);
+                else if (savedTo != null)
+                    Balloon("텍스트 받음 (클립보드 사용 불가, 파일로 저장)", Path.GetFileName(savedTo) + "\n" + preview, ToolTipIcon.Warning, () => OpenFolder(savedTo));
+                else
+                    Balloon("텍스트 받음", preview, ToolTipIcon.Warning, null);
             }
             else
             {
@@ -243,7 +266,7 @@ namespace TkDrop
                 + "수신 상태: " + _receiver.Status + "\n"
                 + "상대 노트북: " + _settings.PeerDisplay + "\n"
                 + "저장 폴더: " + _settings.ResolvedSaveFolder + "\n"
-                + "설정 파일: " + Path.Combine(AppSettings.ExeDirectory, AppSettings.FileName) + "\n\n"
+                + "설정 파일: " + (_settings.LoadedPath ?? Path.Combine(AppSettings.ExeDirectory, AppSettings.FileName) + " (아직 없음)") + "\n\n"
                 + "사용법: 트레이 아이콘 더블클릭 → 파일을 끌어다 놓기.\n"
                 + "탐색기 '보내기' 메뉴에 tkdrop.exe 바로가기를 넣으면 바로 보낼 수 있습니다.";
             MessageBox.Show(text, "tkdrop 정보", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -263,7 +286,7 @@ namespace TkDrop
             try { _tray.Visible = false; } catch { }
             _receiver.Dispose();
             _tray.Dispose();
-            if (_sendForm != null && !_sendForm.IsDisposed) _sendForm.Close();
+            if (_sendForm != null && !_sendForm.IsDisposed) _sendForm.ForceClose();
             _pump.Dispose();
             base.ExitThreadCore();
         }

@@ -67,14 +67,17 @@ namespace TkDrop
         /// <summary>
         /// Connects to the peer's tkdrop service and runs the send session. Blocking; run on a worker thread.
         /// </summary>
-        public static void SendTo(string peerAddress, IList<SendItem> items, Action<string> onStatus, Action<TransferProgress> onProgress, CancellationToken cancel)
+        public static TransferProgress SendTo(string peerAddress, IList<SendItem> items, Action<string> onStatus, Action<TransferProgress> onProgress, CancellationToken cancel)
         {
             BluetoothAddress address;
             if (!TryParseAddress(peerAddress, out address))
                 throw new InvalidOperationException("상대 노트북이 선택되지 않았습니다. 트레이 메뉴에서 '상대 노트북 선택'을 먼저 해주세요.");
+            if (!RadioAvailable())
+                throw new IOException("이 노트북의 블루투스가 꺼져 있거나 없습니다. 블루투스를 켠 뒤 다시 시도하세요.");
 
             BluetoothClient client = null;
             bool connected = false;
+            var gate = new object();
             try
             {
                 client = new BluetoothClient(); // throws SocketException when this PC has no Bluetooth stack
@@ -87,11 +90,14 @@ namespace TkDrop
                 using (var connectTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancel))
                 {
                     connectTimeout.CancelAfter(ConnectTimeoutMs);
-                    using (connectTimeout.Token.Register(() => SafeClose(client)))
+                    // The timeout callback must not dispose a client whose Connect just succeeded; 'connected' is
+                    // flipped under the same lock the callback takes.
+                    using (connectTimeout.Token.Register(() => { lock (gate) { if (!connected) SafeClose(client); } }))
                     {
                         try
                         {
                             client.Connect(address, Protocol.ServiceId);
+                            lock (gate) { connected = true; }
                         }
                         catch (Exception) when (connectTimeout.IsCancellationRequested && !cancel.IsCancellationRequested)
                         {
@@ -100,7 +106,6 @@ namespace TkDrop
                     }
                 }
                 cancel.ThrowIfCancellationRequested();
-                connected = true;
 
                 var stream = client.GetStream();
                 if (stream == null) throw new IOException("연결이 바로 끊어졌습니다.");
@@ -111,7 +116,7 @@ namespace TkDrop
                     if (onStatus != null) onStatus("보내는 중...");
                     using (cancel.Register(() => SafeClose(client)))
                     {
-                        TransferSession.Send(stream, Environment.MachineName, items, onProgress, cancel);
+                        return TransferSession.Send(stream, Environment.MachineName, items, onProgress, cancel);
                     }
                 }
             }
@@ -223,6 +228,7 @@ namespace TkDrop
         private volatile int _restartGeneration;
         private BluetoothListener _listener;
         private readonly object _gate = new object();
+        private readonly ManualResetEvent _wake = new ManualResetEvent(false);
 
         public event Action<string> StatusChanged;          // human readable listener state
         public event Action<ReceivedItem> ItemReceived;
@@ -242,7 +248,23 @@ namespace TkDrop
 
         public void Start()
         {
+            SweepPartFiles();
             _thread.Start();
+        }
+
+        /// <summary>Removes *.tkdrop-part leftovers from a previous crash/exit in the middle of a receive.</summary>
+        private void SweepPartFiles()
+        {
+            try
+            {
+                var folder = _settings.ResolvedSaveFolder;
+                if (!Directory.Exists(folder)) return;
+                foreach (var f in Directory.GetFiles(folder, "*.tkdrop-part", SearchOption.AllDirectories))
+                {
+                    try { File.Delete(f); } catch { }
+                }
+            }
+            catch { }
         }
 
         /// <summary>Tear down the listener; the loop re-creates it (used after resume from sleep or radio toggle).</summary>
@@ -256,6 +278,7 @@ namespace TkDrop
                 _listener = null;
             }
             StopListener(l);
+            _wake.Set(); // cut a back-off sleep short so a radio that just came back is picked up immediately
         }
 
         /// <summary>
@@ -268,12 +291,9 @@ namespace TkDrop
             if (l == null) return;
             for (int attempt = 0; attempt < 2; attempt++)
             {
-                try
-                {
-                    if (!l.Active) return;
-                    l.Stop();
-                    return;
-                }
+                // Called even when !Active: after a Start() that failed at WSASetService the bound socket is
+                // still open and only Stop() closes it. NullReferenceException (no socket) is swallowed.
+                try { l.Stop(); return; }
                 catch { }
             }
         }
@@ -326,7 +346,8 @@ namespace TkDrop
                 if (_stopping) break;
                 // Back off: 3s after the first failure, up to 30s. Covers "Bluetooth is off" until the user turns it on.
                 int delayMs = Math.Min(30000, 3000 * Math.Max(1, failures));
-                Thread.Sleep(delayMs);
+                _wake.Reset();
+                _wake.WaitOne(delayMs);
             }
             SetStatus(false, "중지됨");
         }
@@ -353,6 +374,7 @@ namespace TkDrop
                 var ep = client.Client.RemoteEndPoint as BluetoothEndPoint;
                 if (ep != null) remoteAddress = BtLink.FormatAddress(ep.Address);
                 try { remoteName = client.RemoteMachineName; } catch { }
+                if (string.IsNullOrWhiteSpace(remoteName)) remoteName = null; // 32feet returns "" when unknown
 
                 if (!IsAllowed(remoteAddress, remoteName))
                 {
@@ -388,6 +410,7 @@ namespace TkDrop
         {
             if (remoteAddress == null) return false;
 
+            _settings.Refresh(); // a send-mode process may have chosen the peer meanwhile
             if (!_settings.HasPeer)
             {
                 // The listening socket has no authentication requirement (32feet exposes none), so make sure the
@@ -429,6 +452,7 @@ namespace TkDrop
             _stopping = true;
             Restart();
             if (_thread.IsAlive) _thread.Join(2000);
+            _wake.Close();
         }
     }
 }

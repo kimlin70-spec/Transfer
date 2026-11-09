@@ -87,6 +87,8 @@ namespace TkDrop
 
             test("checksum mismatch is detected", () => CorruptedTransfer(log));
 
+            test("unopenable file is skipped, rest of batch delivered", () => SkippedFile(log));
+
             var report = log.ToString() + (failed == 0 ? "ALL PASSED" : failed + " FAILED") + Environment.NewLine;
             if (!string.IsNullOrEmpty(reportPath))
             {
@@ -150,6 +152,41 @@ namespace TkDrop
                     return false;
                 }
                 return true;
+            }
+            finally
+            {
+                try { Directory.Delete(temp, true); } catch { }
+            }
+        }
+
+        private static bool SkippedFile(StringBuilder log)
+        {
+            var temp = Path.Combine(Path.GetTempPath(), "tkdrop-selftest-" + Guid.NewGuid().ToString("N"));
+            var src = Path.Combine(temp, "src");
+            var dst = Path.Combine(temp, "dst");
+            Directory.CreateDirectory(src);
+            Directory.CreateDirectory(dst);
+            try
+            {
+                File.WriteAllText(Path.Combine(src, "a.txt"), "A");
+                File.WriteAllText(Path.Combine(src, "b.txt"), "B");
+                File.WriteAllText(Path.Combine(src, "c.txt"), "C");
+                var items = new List<SendItem>();
+                foreach (var f in new[] { "a.txt", "b.txt", "c.txt" }) items.AddRange(SendItem.FromPath(Path.Combine(src, f)));
+                File.Delete(Path.Combine(src, "b.txt")); // vanishes between drop and send
+
+                var received = new List<ReceivedItem>();
+                TransferProgress result = null;
+                Exception receiveError;
+                RunPair(
+                    serverStream => { TransferSession.Receive(serverStream, dst, received.Add, null, CancellationToken.None); },
+                    clientStream => { result = TransferSession.Send(clientStream, "TESTER", items, null, CancellationToken.None); },
+                    out receiveError);
+
+                if (receiveError != null) { log.AppendLine("     receive error: " + receiveError.Message); return false; }
+                if (result == null || result.Skipped.Count != 1) { log.AppendLine("     skipped count " + (result == null ? -1 : result.Skipped.Count)); return false; }
+                log.AppendLine("     skipped: " + result.Skipped[0]);
+                return received.Count == 2 && File.Exists(Path.Combine(dst, "a.txt")) && File.Exists(Path.Combine(dst, "c.txt")) && !File.Exists(Path.Combine(dst, "b.txt"));
             }
             finally
             {

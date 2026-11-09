@@ -13,6 +13,8 @@ namespace TkDrop
         public int ItemCount;
         public long BytesDone;
         public long BytesTotal;
+        /// <summary>Items that could not be opened locally and were skipped (display name + reason).</summary>
+        public readonly List<string> Skipped = new List<string>();
         public int Percent { get { return BytesTotal <= 0 ? 100 : (int)Math.Min(100, BytesDone * 100 / BytesTotal); } }
     }
 
@@ -32,8 +34,11 @@ namespace TkDrop
     /// </summary>
     public static class TransferSession
     {
-        /// <summary>Sends all items over an already-connected stream. Throws on any failure.</summary>
-        public static void Send(Stream stream, string senderName, IList<SendItem> items, Action<TransferProgress> onProgress, CancellationToken cancel)
+        /// <summary>
+        /// Sends all items over an already-connected stream. Files that cannot be opened locally are skipped
+        /// (listed in the returned progress) so the rest of the batch still arrives. Throws on transport failure.
+        /// </summary>
+        public static TransferProgress Send(Stream stream, string senderName, IList<SendItem> items, Action<TransferProgress> onProgress, CancellationToken cancel)
         {
             var progress = new TransferProgress { ItemCount = items.Count, BytesTotal = SendItem.TotalSize(items) };
             var w = new BinaryWriter(stream, Protocol.Utf8, leaveOpen: true);
@@ -59,7 +64,22 @@ namespace TkDrop
                 }
                 else
                 {
-                    using (var file = new FileStream(item.LocalPath, FileMode.Open, FileAccess.Read, FileShare.Read, Protocol.BufferSize))
+                    FileStream file;
+                    try
+                    {
+                        // ReadWrite|Delete sharing so documents currently open in Word/Excel/etc. can still be sent.
+                        file = new FileStream(item.LocalPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, Protocol.BufferSize);
+                    }
+                    catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is NotSupportedException)
+                    {
+                        // Local problem with this one file: skip it, keep the session alive for the others.
+                        progress.Skipped.Add(item.Display + " - " + DescribeOpenError(ex));
+                        progress.BytesTotal -= item.Size;
+                        Report(onProgress, progress);
+                        continue;
+                    }
+
+                    using (file)
                     using (var hash = Protocol.NewHash())
                     {
                         long size = file.Length;
@@ -93,6 +113,16 @@ namespace TkDrop
             w.Write(Protocol.KindEnd);
             w.Flush();
             ExpectAck(r, "종료");
+            return progress;
+        }
+
+        private static string DescribeOpenError(Exception ex)
+        {
+            if (ex is FileNotFoundException || ex is DirectoryNotFoundException) return "파일을 찾을 수 없음";
+            if (ex is UnauthorizedAccessException) return "접근 권한 없음";
+            var io = ex as IOException;
+            if (io != null && (io.HResult & 0xFFFF) == 32) return "다른 프로그램이 사용 중"; // ERROR_SHARING_VIOLATION
+            return ex.Message;
         }
 
         private static void ExpectAck(BinaryReader r, string what)
@@ -142,7 +172,7 @@ namespace TkDrop
                 index++;
                 if (kind == Protocol.KindText)
                 {
-                    var text = ReadBoundedString(r, Protocol.MaxTextBytes);
+                    var text = Protocol.ReadBoundedString(r, Protocol.MaxTextBytes);
                     w.Write(Protocol.AckOk);
                     w.Flush();
                     onItem(new ReceivedItem { IsText = true, Text = text, Size = Protocol.Utf8.GetByteCount(text), SenderName = sender });
@@ -152,7 +182,7 @@ namespace TkDrop
                 if (kind != Protocol.KindFile)
                     throw new InvalidDataException("알 수 없는 항목 종류: " + kind);
 
-                var rawName = ReadBoundedString(r, Protocol.MaxNameBytes);
+                var rawName = Protocol.ReadBoundedString(r, Protocol.MaxNameBytes);
                 long size = r.ReadInt64();
                 if (size < 0) throw new InvalidDataException("잘못된 파일 크기: " + size);
 
@@ -213,30 +243,6 @@ namespace TkDrop
                 w.Flush();
                 onItem(new ReceivedItem { SavedPath = finalPath, Size = size, SenderName = sender });
             }
-        }
-
-        private static string ReadBoundedString(BinaryReader r, int maxBytes)
-        {
-            // BinaryReader.ReadString uses a 7-bit encoded byte length prefix; peek it to enforce the bound.
-            int length = Read7BitEncodedInt(r);
-            if (length < 0 || length > maxBytes) throw new InvalidDataException("문자열 길이가 허용 범위를 벗어났습니다: " + length);
-            var bytes = r.ReadBytes(length);
-            if (bytes.Length != length) throw new EndOfStreamException();
-            return Protocol.Utf8.GetString(bytes);
-        }
-
-        private static int Read7BitEncodedInt(BinaryReader r)
-        {
-            int count = 0, shift = 0;
-            byte b;
-            do
-            {
-                if (shift == 5 * 7) throw new FormatException("잘못된 7비트 길이 접두사");
-                b = r.ReadByte();
-                count |= (b & 0x7F) << shift;
-                shift += 7;
-            } while ((b & 0x80) != 0);
-            return count;
         }
 
         private static byte[] ReadExactly(Stream s, int count)

@@ -29,6 +29,7 @@ namespace TkDrop
         private CancellationTokenSource _cts;
         private readonly Stopwatch _uiThrottle = Stopwatch.StartNew();
         private bool _sending;
+        private bool _forceClose;
 
         public SendForm(AppSettings settings, IList<SendItem> initialItems, bool closeWhenDone)
         {
@@ -88,6 +89,7 @@ namespace TkDrop
 
             _progress.Bounds = new Rectangle(14, 252, 412, 18);
             _status.Bounds = new Rectangle(14, 278, 412, 44);
+            _status.AutoEllipsis = true; // long error text gets "..." and a hover tooltip instead of being clipped
             _status.Text = _settings.HasPeer ? "대기 중" : "먼저 '변경'을 눌러 상대 노트북을 선택하세요.";
 
             Controls.AddRange(new Control[] { _peerLabel, _peerLink, _dropZone, _pickButton, _clipButton, _cancelButton, _progress, _status });
@@ -104,7 +106,7 @@ namespace TkDrop
             try { return Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { return null; }
         }
 
-        private void RefreshPeer()
+        public void RefreshPeer()
         {
             _peerLabel.Text = "받는 쪽: " + _settings.PeerDisplay;
             _peerLink.Location = new Point(_peerLabel.Right + 6, 14);
@@ -127,9 +129,7 @@ namespace TkDrop
             using (var dlg = new OpenFileDialog { Multiselect = true, Title = "보낼 파일 선택" })
             {
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
-                var items = new List<SendItem>();
-                foreach (var f in dlg.FileNames) items.AddRange(SendItem.FromPath(f));
-                Enqueue(items);
+                EnqueuePaths(dlg.FileNames);
             }
         }
 
@@ -154,27 +154,52 @@ namespace TkDrop
         private void OnDragDrop(object sender, DragEventArgs e)
         {
             if (_sending) return;
-            var items = new List<SendItem>();
+            // Leave the OLE drop callback before doing anything slow or modal, otherwise Explorer (the drag
+            // source) is frozen until we return.
             if (e.Data.GetDataPresent(DataFormats.FileDrop))
             {
-                foreach (var p in (string[])e.Data.GetData(DataFormats.FileDrop)) items.AddRange(SendItem.FromPath(p));
+                var paths = (string[])e.Data.GetData(DataFormats.FileDrop);
+                BeginInvoke((Action)(() => EnqueuePaths(paths)));
             }
             else if (e.Data.GetDataPresent(DataFormats.UnicodeText))
             {
                 var text = e.Data.GetData(DataFormats.UnicodeText) as string;
-                if (!string.IsNullOrEmpty(text)) items.Add(SendItem.FromText(text));
+                if (!string.IsNullOrEmpty(text)) BeginInvoke((Action)(() => Enqueue(new List<SendItem> { SendItem.FromText(text) })));
             }
+        }
+
+        /// <summary>Expands files/folders and queues them; unreadable entries are reported in the status line.</summary>
+        public void EnqueuePaths(IEnumerable<string> paths)
+        {
+            var items = new List<SendItem>();
+            var skipped = new List<string>();
+            foreach (var p in paths) items.AddRange(SendItem.FromPath(p, skipped));
             Enqueue(items);
+            if (skipped.Count > 0)
+            {
+                _status.ForeColor = Color.FromArgb(180, 90, 0);
+                _status.Text = skipped.Count + "개 항목을 읽을 수 없어 건너뜀: " + Path.GetFileName(skipped[0]) + (skipped.Count > 1 ? " 외" : "")
+                    + (items.Count > 0 ? "  (나머지는 전송)" : "");
+            }
         }
 
         /// <summary>Adds items to the outgoing queue and starts sending if idle.</summary>
         public void Enqueue(IList<SendItem> items)
         {
             if (items == null) return;
-            foreach (var i in items) _queue.Enqueue(i);
+            foreach (var i in items)
+            {
+                if (i.IsText && i.Size > Protocol.MaxTextBytes)
+                {
+                    _status.ForeColor = Color.FromArgb(180, 30, 30);
+                    _status.Text = "텍스트가 너무 큽니다 (" + Protocol.FormatSize(i.Size) + ", 최대 " + Protocol.FormatSize(Protocol.MaxTextBytes) + "). 파일로 저장해서 보내세요.";
+                    continue;
+                }
+                _queue.Enqueue(i);
+            }
             if (_queue.Count == 0)
             {
-                _status.Text = "보낼 파일이 없습니다.";
+                if (_status.ForeColor == SystemColors.ControlText) _status.Text = "보낼 파일이 없습니다.";
                 return;
             }
             if (!_sending) StartNext();
@@ -198,6 +223,7 @@ namespace TkDrop
             var batch = new List<SendItem>(_queue);
             _queue.Clear();
 
+            _closeTimer.Stop();
             _sending = true;
             _cts = new CancellationTokenSource();
             var token = _cts.Token;
@@ -209,13 +235,14 @@ namespace TkDrop
             var worker = new Thread(() =>
             {
                 Exception error = null;
+                TransferProgress result = null;
                 try
                 {
-                    BtLink.SendTo(peer, batch, status => Ui(() => _status.Text = status), p => OnProgress(p), token);
+                    result = BtLink.SendTo(peer, batch, status => Ui(() => _status.Text = status), p => OnProgress(p), token);
                 }
                 catch (OperationCanceledException) { error = new OperationCanceledException(); }
                 catch (Exception ex) { error = ex; }
-                Ui(() => OnFinished(batch, error));
+                Ui(() => OnFinished(batch, result, error));
             }) { IsBackground = true, Name = "tkdrop-sender" };
             worker.Start();
         }
@@ -233,7 +260,7 @@ namespace TkDrop
             });
         }
 
-        private void OnFinished(List<SendItem> batch, Exception error)
+        private void OnFinished(List<SendItem> batch, TransferProgress result, Exception error)
         {
             _sending = false;
             _cts.Dispose();
@@ -243,9 +270,20 @@ namespace TkDrop
             if (error == null)
             {
                 _progress.Value = 100;
-                _status.ForeColor = Color.FromArgb(20, 120, 60);
-                _status.Text = "완료: " + batch.Count + "개 보냄 (" + Protocol.FormatSize(SendItem.TotalSize(batch)) + ")";
-                if (_closeWhenDone && _queue.Count == 0) _closeTimer.Start();
+                int skipped = result == null ? 0 : result.Skipped.Count;
+                int sent = batch.Count - skipped;
+                if (skipped == 0)
+                {
+                    _status.ForeColor = Color.FromArgb(20, 120, 60);
+                    _status.Text = "완료: " + sent + "개 보냄 (" + Protocol.FormatSize(SendItem.TotalSize(batch)) + ")";
+                    if (_closeWhenDone && _queue.Count == 0) _closeTimer.Start();
+                }
+                else
+                {
+                    // Partial success: keep the window open so the user sees which files did not go.
+                    _status.ForeColor = Color.FromArgb(180, 90, 0);
+                    _status.Text = sent + "개 보냄, " + skipped + "개 못 보냄: " + result.Skipped[0] + (skipped > 1 ? " 외" : "");
+                }
             }
             else if (error is OperationCanceledException)
             {
@@ -281,9 +319,17 @@ namespace TkDrop
             try { BeginInvoke(action); } catch (ObjectDisposedException) { } catch (InvalidOperationException) { }
         }
 
+        /// <summary>Close without the "cancel and close?" prompt (used when the tray app exits).</summary>
+        public void ForceClose()
+        {
+            _forceClose = true;
+            if (_cts != null) _cts.Cancel();
+            Close();
+        }
+
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (_sending && e.CloseReason == CloseReason.UserClosing)
+            if (_sending && !_forceClose && e.CloseReason == CloseReason.UserClosing)
             {
                 var r = MessageBox.Show(this, "전송 중입니다. 취소하고 닫을까요?", Program.AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (r != DialogResult.Yes) { e.Cancel = true; return; }

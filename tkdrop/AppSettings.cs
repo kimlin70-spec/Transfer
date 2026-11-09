@@ -21,6 +21,9 @@ namespace TkDrop
 
         public static readonly string FileName = "tkdrop.settings.json";
 
+        /// <summary>Path the settings were last loaded from or saved to (null = defaults, nothing on disk yet).</summary>
+        public string LoadedPath { get; private set; }
+
         public string ResolvedSaveFolder
         {
             get
@@ -67,7 +70,7 @@ namespace TkDrop
                     {
                         var ser = new DataContractJsonSerializer(typeof(AppSettings));
                         var s = (AppSettings)ser.ReadObject(fs);
-                        if (s != null) return s;
+                        if (s != null) { s.LoadedPath = path; return s; }
                     }
                 }
                 catch
@@ -76,6 +79,20 @@ namespace TkDrop
                 }
             }
             return new AppSettings();
+        }
+
+        /// <summary>
+        /// Re-reads the file and copies its values into this instance, so the tray process picks up a peer
+        /// chosen by a separate "send mode" process (they share the same settings file).
+        /// </summary>
+        public void Refresh()
+        {
+            var fresh = Load();
+            if (fresh.LoadedPath == null) return;
+            PeerAddress = fresh.PeerAddress;
+            PeerName = fresh.PeerName;
+            SaveFolder = fresh.SaveFolder;
+            LoadedPath = fresh.LoadedPath;
         }
 
         public void Save()
@@ -97,6 +114,7 @@ namespace TkDrop
                     var tmp = path + ".tmp";
                     File.WriteAllBytes(tmp, json);
                     if (File.Exists(path)) File.Replace(tmp, path, null); else File.Move(tmp, path);
+                    LoadedPath = path;
                     return;
                 }
                 catch (Exception ex)
