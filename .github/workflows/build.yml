@@ -6,6 +6,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: "릴리스 버전 (예: 1.0.0). 비우면 빌드만 하고 Artifact 업로드"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -22,6 +27,7 @@ jobs:
         run: |
           $v = "1.0.0"
           if ("${{ github.ref }}" -like "refs/tags/v*") { $v = "${{ github.ref_name }}".Substring(1) }
+          elseif ("${{ github.event.inputs.release_version }}" -ne "") { $v = "${{ github.event.inputs.release_version }}".TrimStart("v") }
           "version=$v" >> $env:GITHUB_OUTPUT
           "building version $v"
 
@@ -54,9 +60,13 @@ jobs:
           path: dist/tkdrop.exe
           if-no-files-found: error
 
-      - name: Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Runs on a v* tag push, or on a manual run with release_version set (the tag is then created at this commit).
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_version != ''
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: tkdrop ${{ steps.ver.outputs.version }}
           files: dist/tkdrop.exe
           generate_release_notes: true
+          fail_on_unmatched_files: true
