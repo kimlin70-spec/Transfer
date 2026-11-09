@@ -181,11 +181,17 @@ namespace TkDrop
             try { client.Dispose(); } catch { }
         }
 
-        /// <summary>True when Windows lists <paramref name="address"/> among the paired (authenticated) devices.</summary>
+        /// <summary>True when Windows reports <paramref name="address"/> as paired (authenticated) with this PC.</summary>
         public static bool IsPaired(string address)
         {
             BluetoothAddress target;
             if (!TryParseAddress(address, out target)) return false;
+            try
+            {
+                // One BluetoothGetDeviceInfo call; no enumeration.
+                return new BluetoothDeviceInfo(target).Authenticated;
+            }
+            catch { }
             try
             {
                 foreach (var d in ListPairedDevices())

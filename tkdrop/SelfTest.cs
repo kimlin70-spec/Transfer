@@ -68,6 +68,9 @@ namespace TkDrop
                 { "한글 파일.txt", "한글 파일.txt" },
                 { "trailing. ", "trailing" },
                 { "/abs/path.txt", Path.Combine("abs", "path.txt") },
+                { new string('a', 300) + ".txt", new string('a', 116) + ".txt" },
+                { "NUL", "_NUL" },
+                { "dir/../x.txt", Path.Combine("dir", "x.txt") },
             };
             for (int i = 0; i < sanitizeCases.GetLength(0); i++)
             {

@@ -41,6 +41,9 @@ namespace TkDrop
         /// <summary>Upper bound for a relative file name on the wire.</summary>
         public const int MaxNameBytes = 4096;
 
+        /// <summary>Longest single path segment we create (keeps Desktop\tkdrop\... under MAX_PATH with room to spare).</summary>
+        public const int MaxSegmentChars = 120;
+
         public static readonly Encoding Utf8 = new UTF8Encoding(false);
 
         public static void WriteHello(BinaryWriter w, string senderName)
@@ -85,10 +88,25 @@ namespace TkDrop
                 var final = cleaned.ToString().TrimEnd('.', ' ');
                 if (final.Length == 0) final = "_";
                 if (IsReservedDeviceName(final)) final = "_" + final;
+                final = Shorten(final, MaxSegmentChars);
                 if (sb.Length > 0) sb.Append(Path.DirectorySeparatorChar);
                 sb.Append(final);
             }
             return sb.Length == 0 ? "file" : sb.ToString();
+        }
+
+        /// <summary>Trims an over-long name while keeping its extension (up to 20 chars of it).</summary>
+        private static string Shorten(string name, int max)
+        {
+            if (name.Length <= max) return name;
+            var ext = Path.GetExtension(name);
+            if (ext.Length > 20) ext = "";
+            var stem = name.Substring(0, name.Length - ext.Length);
+            int keep = Math.Max(1, max - ext.Length);
+            if (stem.Length > keep) stem = stem.Substring(0, keep);
+            // Do not cut in the middle of a surrogate pair.
+            if (stem.Length > 0 && char.IsHighSurrogate(stem[stem.Length - 1])) stem = stem.Substring(0, stem.Length - 1);
+            return stem.TrimEnd('.', ' ') + ext;
         }
 
         private static bool IsReservedDeviceName(string name)

@@ -135,7 +135,10 @@ namespace TkDrop
             if (item.IsText)
             {
                 bool copied = false;
-                try { Clipboard.SetText(item.Text); copied = true; } catch { }
+                if (!string.IsNullOrEmpty(item.Text))
+                {
+                    try { Clipboard.SetText(item.Text); copied = true; } catch { } // ExternalException when another app holds the clipboard
+                }
                 var preview = item.Text.Length > 120 ? item.Text.Substring(0, 120) + "..." : item.Text;
                 Balloon(copied ? "텍스트 받음 (클립보드에 복사됨)" : "텍스트 받음", preview, ToolTipIcon.Info, null);
             }
