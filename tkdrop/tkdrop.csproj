@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>7.3</LangVersion>
+    <AssemblyName>tkdrop</AssemblyName>
+    <RootNamespace>TkDrop</RootNamespace>
+    <ApplicationIcon>Resources\tkdrop.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>1.0.0</Version>
+    <Product>tkdrop</Product>
+    <Description>Bluetooth file drop between two Windows laptops</Description>
+    <Deterministic>true</Deterministic>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
+    <!-- Single file: do not emit tkdrop.exe.config (it would only pin the CLR sku). -->
+    <GenerateSupportedRuntime>false</GenerateSupportedRuntime>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="InTheHand.Net.Bluetooth" Version="4.2.5" />
+  </ItemGroup>
+
+  <!--
+    Single-exe packaging: every copy-local reference DLL (InTheHand.Net.Bluetooth.dll)
+    is embedded as a resource and loaded by the AssemblyResolve handler in Program.cs.
+    Hooked after ResolveReferences so NuGet-resolved items are already present, and
+    before PrepareResources/CoreCompile consume EmbeddedResource items.
+  -->
+  <Target Name="EmbedReferencedAssemblies" AfterTargets="ResolveReferences">
+    <ItemGroup>
+      <EmbeddedResource Include="@(ReferenceCopyLocalPaths)" Condition="'%(Extension)' == '.dll'">
+        <LogicalName>tkdrop.embedded.%(Filename)%(Extension)</LogicalName>
+      </EmbeddedResource>
+    </ItemGroup>
+  </Target>
+
+</Project>
